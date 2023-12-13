@@ -1,0 +1,265 @@
+# ok, 
+# here I would like to overlay earthquakes and 
+# stork tracks..
+# 
+setwd('d:\\Storks\\earth_quakes')
+
+library(dplyr)
+library(sf)
+install.packages('move2')
+
+library(move2)
+
+##############
+earth_quakes<-read.csv('important_earth_quakes.csv')
+earth_quakes$time<- as.POSIXct(earth_quakes$time, tz='UTC')
+# has got a better source now - USGS data https://earthquake.usgs.gov/earthquakes/search/
+# dowmloaded earth quakes from Jun 2015 to June 2023 with magnitude over 6 - 1100 lines.
+
+earth_quakes<-data.table::fread('earth_quakes_more_than_6_since_2010.csv') %>% st_as_sf(coords = c("longitude", "latitude"), crs = "EPSG:4326", remove=FALSE)
+
+
+# will try 
+
+##############
+# downloaded all data from the white stork lifetrack available for download in Movebank by 06 July 2023 (the might be more points coming later).
+
+# Now I want to go throug the files and extract the tracks that were within 300 km within 10 days before the earth quake.
+ 
+# 1 read the first file
+#tracking_data<-data.table::fread('LifeTrack White Stork Bavaria.csv') %>% st_as_sf(coords = c("location-long", "location-lat"), crs = "EPSG:4326")
+############################################################
+tracking_data<-move2::mt_read('Egyptian vultures in the Middle East and East Africa.csv') #  %>% filter(!st_is_empty())
+
+#########################################################
+########################################################
+
+Empty_coords<-st_is_empty(tracking_data)
+if (sum(Empty_coords) >0) {
+tracking_data<- tracking_data[!Empty_coords,]
+}
+# Now we want to 1 - overlay in space and then 2 overlay in time
+# 1. which tracks have overlapping space with the time of the earth quakes?
+# estimate distance from each point in a track to points in the earth quakes, select only ones, that are below 300 km, return names of the tracks that have any points that get close.
+
+#tmp<-s2::s2_closest_feature(tracking_data, earth_quakes) 
+# the same
+
+# to speed up things decided to 1 create buffer around track points and subset earth quakes within the buffer..
+
+#plot(tracking_data[1:1000,], max.plot=1)
+#tmpx<-st_buffer(tracking_data[1:1000,], 3) %>% st_union()
+#plot(tmpx, add=TRUE)
+
+#######################################
+# correction 06 July 2023
+# realised that for each point, I should first select time and then for each pair select distance <300 and then select select minimum time again. phhh...
+# 1. time selecton
+if (FALSE) {
+trk<-tracking_data[1:1000,] 
+
+a<-Sys.time()
+sapply(seq_len(nrow(trk)),  FUN=function(x) {Index=seq_len(nrow(earth_quakes))[floor(difftime(earth_quakes$time,trk$timestamp[x], unit="days")/10)==0]; Index[which.min(st_distance(trk[x,], earth_quakes[Index,]))]})
+print(Sys.time()-a)
+
+a<-Sys.time()
+sapply(seq_len(nrow(trk)),  FUN=function(x) {Index=seq_len(nrow(earth_quakes))[floor(difftime(earth_quakes$time,trk$timestamp[x], unit="days")/10)==0]; Index[st_nearest_feature(trk[x,], earth_quakes[Index,])]})
+print(Sys.time()-a)
+
+trk<-tracking_data[1:100000,] 
+
+Earth_coords_time<-st_coordinates(earth_quakes)  %>%
+                  as.data.frame() %>% 
+                  mutate(time=as.numeric(earth_quakes$time))%>% 
+                  rename(lat=2, lon=1, time=3)
+                  
+trk_coords_time<-st_coordinates(trk)  %>%
+                  as.data.frame() %>% 
+                  mutate(time=as.numeric(trk$timestamp))%>% 
+                  rename(lat=2, lon=1, time=3)
+}
+get_spat_temp_neighbors<-function(x, trk_coords_time, Earth_coords_time, radius, daysdiff) {
+   Index=seq_len(nrow(Earth_coords_time));
+   Temporal=floor((Earth_coords_time[,3]-trk_coords_time[x,3])/(daysdiff*86400))==0
+   Spatial=spatialrisk:::haversine_loop_cpp(Earth_coords_time[,c(1,2)], lat_center=trk_coords_time[x,2], lon_center=trk_coords_time[x,1],  radius=radius);
+   if (nrow(Spatial)==0 | length(Temporal)==0) {Res=c(NA)} else {
+     Out<- Index[(Index %in% Spatial$id) & Temporal]
+     if (length(Out)==0) {Res=c(NA) } else {
+        if (length(Out)==1) {Res=Out} else {
+        Res<-Spatial$id[Spatial$id %in% Out][which.min(Spatial$distance_m[Spatial$id %in% Out])]
+       }
+     }
+   }
+   return(Res)
+}
+
+if (FALSE) {
+a<-Sys.time()
+tmpx<-sapply(seq_len(nrow(trk)), FUN=function(x) get_spat_temp_neighbors(x, trk_coords_time, Earth_coords_time, 300000, 10))
+print(Sys.time()-a)
+
+library(compiler)
+
+get_spat_temp_neighbors_c<-cmpfun(get_spat_temp_neighbors)
+
+a<-Sys.time()
+tmpx<-sapply(seq_len(nrow(trk)), FUN=function(x) get_spat_temp_neighbors_c(x, trk_coords_time, Earth_coords_time, 300000, 10))
+print(Sys.time()-a)
+
+}
+
+
+if (nrow(tracking_data)>1000000) {
+  total_runs<-ceiling(nrow(tracking_data)/5e5)
+  tmp2<-c()
+  for (i in 1:total_runs) {
+     Index<-((i-1)*5e5 +1):(min(c(nrow(tracking_data), (i)*5e5)))
+  cat('\r doing',  i , 'of',total_runs)
+    trk<-tracking_data[Index,] 
+    Earth_coords_time<-st_coordinates(earth_quakes)  %>%
+                  as.data.frame() %>% 
+                  mutate(time=as.numeric(earth_quakes$time))%>% 
+                  rename(lat=2, lon=1, time=3)
+                  
+    trk_coords_time<-st_coordinates(trk)  %>%
+                  as.data.frame() %>% 
+                  mutate(time=as.numeric(trk$timestamp))%>% 
+                  rename(lat=2, lon=1, time=3)
+    tmp2<-c(tmp2,sapply(seq_len(nrow(trk)), FUN=function(x) get_spat_temp_neighbors_c(x, trk_coords_time, Earth_coords_time, 300000, 10)))
+
+    
+    
+ }
+
+} else {
+#tmp2<-st_nearest_feature(tracking_data, earth_quakes)
+trk<-tracking_data 
+Earth_coords_time<-st_coordinates(earth_quakes)  %>%
+                  as.data.frame() %>% 
+                  mutate(time=as.numeric(earth_quakes$time))%>% 
+                  rename(lat=2, lon=1, time=3)
+                  
+trk_coords_time<-st_coordinates(trk)  %>%
+                  as.data.frame() %>% 
+                  mutate(time=as.numeric(trk$timestamp))%>% 
+                  rename(lat=2, lon=1, time=3)
+a<-Sys.time()
+tmp2<-sapply(seq_len(nrow(trk)), FUN=function(x) get_spat_temp_neighbors_c(x, trk_coords_time, Earth_coords_time, 300000, 10))
+print(Sys.time()-a)
+
+}
+gc() 
+#tmp2a<-apply(st_distance(tracking_data[1:1000000,], earth_quakes), 1, which.min)
+#st_nearest_feature(tracking_data[1:1000000,], earth_quakes) 
+
+#nn=st_nn(tracking_data, earth_quakes,k=1,maxdist=300000,progress=TRUE, parallel=8)
+closest_distance<-rep(NA, nrow(tracking_data))
+
+
+closest_distance[!is.na(tmp2)]<-st_distance(tracking_data[!is.na(tmp2),], earth_quakes[tmp2[!is.na(tmp2)],], by_element =TRUE)
+
+if (!any(!is.na(tmp2))) cat('no matches!!!!!!!!!\n')
+
+min(closest_distance, na.rm=T)
+
+#########
+# ok, got it, here we might have several overlapping earthquakes.
+#close_points<-which(as.numeric(closest_distance) < 300000)
+close_points<-which(!is.na(tmp2))
+
+# and now I want them also to be within 10 days before the earth quake...
+
+#selected_points<-tracking_data[close_points,] %>% filter(between(timestamp, earth_quakes$time[tmp2][close_points] - as.difftime(10, unit="days"), earth_quakes$time[tmp2][close_points]))
+selected_points<-tracking_data[close_points,]
+
+nrow(selected_points)
+
+###############################################################
+###############################################################
+# Now I want to add distance to the earth quake and time to Earth Quake as a seprate column..
+
+Nearest_quake_ID<-tmp2[!is.na(tmp2)]
+Nearest_quake_distance<-closest_distance[!is.na(tmp2)]
+
+min(Nearest_quake_distance, na.rm=TRUE)
+
+Nearest_quake_params<- earth_quakes[Nearest_quake_ID,] %>% select(quake_longitude=longitude, quake_latitude=latitude, quake_time=time, quake_mag=mag, quake_depth=depth) %>% mutate(`event-id`=selected_points$`event-id`) %>%  mutate(Dist2quake=Nearest_quake_distance) %>% st_drop_geometry()
+ 
+# Now I need to select only tracks that have the animal ID of the selected points.
+
+
+Final_tracks<-tracking_data %>% filter(`individual-local-identifier` %in% unique(selected_points$`individual-local-identifier`))
+#Final_tracks<-tracking_data %>% filter(`individual-tag-local-identifier` %in% unique(selected_points$`individual-tag-local-identifier`))
+
+Final_tracks <- Final_tracks %>% left_join(Nearest_quake_params, by = "event-id")
+
+#length(unique(selected_points$`individual-tag-local-identifier`))
+length(unique(selected_points$`individual-local-identifier`))
+
+
+#install.packages('move2')
+
+#library(move2)
+#load(Final_tracks, file='Final_tracks_Bavaria.RData')
+
+# earth quakes are annotated 
+
+#Final_tracks$quake_time[!is.na(Final_tracks$quake_time)]
+
+save(Final_tracks, file='LifeTrack White Stork SW Germany.RData')
+
+# Bavaria - two tracks
+# Armenia - 1
+# LifeTrack White Stork Greece Evros Delta .csv - 0
+# LifeTrack White Stork Kosova.csv - 0
+# loburg 2
+# Moscow 0
+# Oberschwaben 1 234 km
+# Poland 0
+# Poland egg 0
+# Rheinland-Pfalz 2
+# LifeTrack White Stork Sarralbe [ID_PROG 1093].csv 0
+# Sicily 0
+# SOuth Africa 0
+# SW Germany 3 202 km
+# SW Germany Care Centre Releases 0
+# LifeTrack White Stork Tunisia.csv 0
+# LifeTrack White Stork Uzbekistan.csv 10
+# Vorarlberg 0
+
+
+
+
+################################################
+# now have decided to plot coordinates of all the stork data
+
+load('Final_tracks_Uzbekistan.RData')
+
+for (i in 1:length(unique(Final_tracks$`individual-local-identifier`))) {
+    cur_quakes<-unique(Final_tracks$quake_time[Final_tracks$`individual-local-identifier`==unique(Final_tracks$`individual-local-identifier`)[i]]) |> na.omit()
+    
+    Track_cur<-filter(Final_tracks, `individual-local-identifier`==unique(`individual-local-identifier`)[i])
+    
+    Track_cur$days2quake<-sapply(Track_cur$timestamp, function(x) as.numeric(max(difftime(x, cur_quakes+3*24*60*60, units ='days'))))
+    
+    Track_cur<-Track_cur |> filter(days2quake > (-60) & days2quake <(4))
+    pdf(file=paste0( substr(unique(Final_tracks$`individual-local-identifier`)[i], 1, 4), '.SWG.lat_before_quake.pdf'), width=14)
+    par(mfrow=c(1,2))
+    plot(st_coordinates(Track_cur)[,2]~Track_cur$days2quake, pch='+', main=unique(Final_tracks$`individual-local-identifier`)[i])
+    lines(st_coordinates(Track_cur)[,2]~Track_cur$days2quake)
+    abline(v=c(-100:10), col=grey(0.5))
+    abline(v=0, col='red', lwd=2)
+    lines(st_coordinates(Track_cur)[,2]~Track_cur$days2quake)
+    points(st_coordinates(Track_cur)[,2]~Track_cur$days2quake, pch='+')
+    Track_cur<-Track_cur |> filter(days2quake > (-15) & days2quake <(2))
+    plot(st_coordinates(Track_cur)[,2]~Track_cur$days2quake, pch='+', main=unique(Final_tracks$`individual-local-identifier`)[i])
+    lines(st_coordinates(Track_cur)[,2]~Track_cur$days2quake)
+    abline(v=c(-100:10), col=grey(0.5))
+    abline(v=0, col='red', lwd=2)
+    lines(st_coordinates(Track_cur)[,2]~Track_cur$days2quake)
+    points(st_coordinates(Track_cur)[,2]~Track_cur$days2quake, pch='+')
+   
+    dev.off()
+}
+
+
